@@ -4,13 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - 'TopNotch_Public_Safe_Windows_QA_Source/app/**'
-      - 'TopNotch_Public_Safe_Windows_QA_Source/tests/**'
+      - 'TopNotch_Public_Safe_Windows_QA_Source/**'
       - '.github/workflows/windows-acceptance.yml'
   pull_request:
     paths:
-      - 'TopNotch_Public_Safe_Windows_QA_Source/app/**'
-      - 'TopNotch_Public_Safe_Windows_QA_Source/tests/**'
+      - 'TopNotch_Public_Safe_Windows_QA_Source/**'
       - '.github/workflows/windows-acceptance.yml'
 permissions:
   contents: read
@@ -23,6 +21,25 @@ jobs:
         working-directory: TopNotch_Public_Safe_Windows_QA_Source
     steps:
       - uses: actions/checkout@v4
+      - name: Overlay v2.2 integration source (preserve baseline tests and dependencies)
+        shell: pwsh
+        run: |
+          $patch = 'TopNotch_OfficeManager_CommandCenter_QA_Update_v2.2/TopNotch_Public_Safe_Windows_QA_Source'
+          $required = @(
+            'app/main.go',
+            'app/App/office.html',
+            'tests/test_windows_browser.py',
+            'tests/test_cc_bridge_windows.py',
+            'tests/test_cc_bridge_portable.py'
+          )
+          foreach ($relative in $required) {
+            $source = Join-Path $patch $relative
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing v2.2 patch source: $source" }
+            Copy-Item -LiteralPath $source -Destination $relative -Force
+            Write-Host "Applied v2.2: $relative"
+          }
+          if (-not (Select-String -Path 'app/main.go' -Pattern 'commandCenter' -Quiet)) { throw 'Command Center bridge is absent from main.go' }
+          if (-not (Select-String -Path 'app/App/office.html' -Pattern 'ccHome' -Quiet)) { throw 'Command Center controls absent from UI' }
       - uses: actions/setup-go@v5
         with:
           go-version-file: TopNotch_Public_Safe_Windows_QA_Source/app/go.mod
@@ -30,7 +47,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile Windows executable
+      - name: Compile native Windows executable
         shell: pwsh
         run: |
           Push-Location app
@@ -38,41 +55,46 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Go build failed' }
           Pop-Location
           $exe = Get-Item app/OfficeManager.exe
-          if ($exe.Length -lt 100000) { throw 'Invalid executable size' }
+          if ($exe.Length -lt 100000) { throw 'Executable missing or unexpectedly small' }
           Get-FileHash app/OfficeManager.exe -Algorithm SHA256
-      - name: Generate synthetic document fixtures (NOT production forms)
+      - name: Generate synthetic QA fixtures (not production forms)
         shell: pwsh
         run: |
           python tests/make_test_templates.py
-          if ($LASTEXITCODE -ne 0) { throw 'Test fixtures failed' }
-      - name: Run 500 real Windows API workflows
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture setup failed' }
+      - name: 500 real Windows job workflows
         shell: pwsh
         run: |
           python tests/test_500_workflows.py
-          if ($LASTEXITCODE -ne 0) { throw '500 workflow test failed' }
-      - name: Install Chromium browser test dependency
+          if ($LASTEXITCODE -ne 0) { throw '500 workflow regression failed' }
+      - name: Command Center bridge on native Windows (synthetic launcher)
+        shell: pwsh
+        run: |
+          python tests/test_cc_bridge_windows.py
+          if ($LASTEXITCODE -ne 0) { throw 'Command Center bridge test failed' }
+      - name: Install Chromium for real browser tests
         shell: pwsh
         run: |
           python -m pip install playwright==1.55.0
           if ($LASTEXITCODE -ne 0) { throw 'Playwright install failed' }
           python -m playwright install chromium
-          if ($LASTEXITCODE -ne 0) { throw 'Chromium install failed' }
-      - name: Launch EXE and test live UI in Chromium
+          if ($LASTEXITCODE -ne 0) { throw 'Chromium installation failed' }
+      - name: Test live Windows UI and integration handoff
         shell: pwsh
         run: |
           python tests/test_windows_browser.py
-          if ($LASTEXITCODE -ne 0) { throw 'Windows browser UI test failed' }
-      - name: Inspect Windows executable and browser evidence
+          if ($LASTEXITCODE -ne 0) { throw 'Windows browser tests failed' }
+      - name: Inspect Windows executable and screenshots
         shell: pwsh
         if: always()
         run: |
           if (Test-Path app/OfficeManager.exe) { Get-FileHash app/OfficeManager.exe -Algorithm SHA256 }
           Get-ChildItem . -Filter 'windows-*.png' -ErrorAction SilentlyContinue | Select-Object Name,Length
-      - name: Upload evidence (even on failure)
+      - name: Upload QA evidence (even if tests fail)
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: office-manager-windows-qa-${{ github.run_number }}
+          name: office-manager-windows-v22-qa-${{ github.run_number }}
           path: |
             TopNotch_Public_Safe_Windows_QA_Source/windows-*.png
             TopNotch_Public_Safe_Windows_QA_Source/app/OfficeManager.exe
