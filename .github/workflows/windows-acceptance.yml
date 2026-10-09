@@ -38,6 +38,21 @@ jobs:
             Copy-Item -LiteralPath $source -Destination $relative -Force
             Write-Host "Applied v2.2: $relative"
           }
+          # The launched .bat runs asynchronously. Do not give its cmd.exe a current
+          # working directory inside the TemporaryDirectory being deleted by Python.
+          # No application source files are changed by this test-harness repair.
+          $cwdFixes = @(
+            @{ Path='tests/test_cc_bridge_windows.py'; From='cwd=inst,stdout='; To='cwd=Path(td).parent,stdout=' },
+            @{ Path='tests/test_windows_browser.py'; From='cwd=str(inst),stdout='; To='cwd=str(Path(tmp).parent),stdout=' }
+          )
+          foreach ($fix in $cwdFixes) {
+            $path = (Resolve-Path -LiteralPath $fix.Path).Path
+            $source = [System.IO.File]::ReadAllText($path)
+            if (-not $source.Contains($fix.From)) { throw "Missing expected Windows test fixture: $($fix.Path)" }
+            $source = $source.Replace($fix.From, $fix.To)
+            [System.IO.File]::WriteAllText($path, $source, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host "Isolated child-process CWD from scratch directory: $($fix.Path)"
+          }
           if (-not (Select-String -Path 'app/main.go' -Pattern 'commandCenter' -Quiet)) { throw 'Command Center bridge is absent from main.go' }
           if (-not (Select-String -Path 'app/App/office.html' -Pattern 'ccHome' -Quiet)) { throw 'Command Center controls absent from UI' }
       - uses: actions/setup-go@v5
